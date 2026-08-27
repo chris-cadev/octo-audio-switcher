@@ -1,7 +1,6 @@
 import subprocess
 import os
 import re
-import time
 import logging
 from collections import defaultdict
 
@@ -64,18 +63,6 @@ def parsed_wpctl_status():
     return data
 
 
-# A2DP card profiles in order of preferred audio quality (best first).
-# We fall back through this list to whichever profile the card actually exposes.
-A2DP_PROFILE_PREFERENCE = (
-    "a2dp-sink-ldac",
-    "a2dp-sink-aptx_hd",
-    "a2dp-sink-sbc_xq",
-    "a2dp-sink-aptx",
-    "a2dp-sink-aac",
-    "a2dp-sink",
-)
-
-
 def get_node_properties(node_id):
     """Parse `wpctl inspect <id>` into a flat key/value dict."""
     try:
@@ -93,16 +80,18 @@ def get_node_properties(node_id):
     return props
 
 
-def get_bluetooth_low_quality_label(sink_id):
+def get_bluetooth_low_quality_label(sink_id, node_name=None):
     """Return a short label (e.g. 'HFP') if this sink is a Bluetooth node
     currently on a non-A2DP profile, else None.
 
     The label is derived from `api.bluez5.profile` so it stays accurate
     across HSP, HFP head-unit, and HFP audio-gateway variants.
     """
-    props = get_node_properties(sink_id)
-    if not props.get("node.name", "").startswith("bluez_output."):
+    if node_name is None:
+        node_name = get_node_properties(sink_id).get("node.name", "")
+    if not node_name.startswith("bluez_output."):
         return None
+    props = get_node_properties(sink_id)
     profile = props.get("api.bluez5.profile", "")
     if not profile or "a2dp" in profile.lower():
         return None
@@ -131,7 +120,7 @@ def get_saved_card_profile(card_name):
                     continue
                 key, sep, value = line.partition("=")
                 if sep and key.strip() == card_name:
-                    return value.strip()
+                    return value.split("#")[0].strip()
     except OSError:
         pass
     return None
@@ -197,12 +186,15 @@ def ensure_high_quality_profile(sink_id):
 
     # Prefer the codec the user last chose for this specific card, if it's
     # still an A2DP profile and the card still exposes it. Otherwise fall
-    # back to our quality-ordered preference list.
+    # back to plain a2dp-sink and let PipeWire pick the codec from its config.
     saved = get_saved_card_profile(card_name)
     if saved and "a2dp" in saved.lower() and saved in available:
         target = saved
+    elif "a2dp-sink" in available:
+        target = "a2dp-sink"
     else:
-        target = next((p for p in A2DP_PROFILE_PREFERENCE if p in available), None)
+        target = None
+
     if not target:
         logger.warning("No A2DP profile available for %s (have: %s)", card_name, available)
         return sink_id
@@ -214,16 +206,9 @@ def ensure_high_quality_profile(sink_id):
         logger.warning("Failed to set card profile %s on %s: %s", target, card_name, e)
         return sink_id
 
-    # The old HFP sink node is gone — poll briefly for the new A2DP sink on the same device.
-    for _ in range(20):
-        time.sleep(0.1)
-        sinks = parsed_wpctl_status().get("Audio", {}).get("Sinks", {}).get("list", {})
-        for sid in sinks:
-            sprops = get_node_properties(sid)
-            if (sprops.get("device.id") == device_id
-                    and sprops.get("node.name", "").startswith("bluez_output.")):
-                return sid
-    return sink_id
+    # Profile switched — the old HFP sink is gone. Return None so the caller
+    # re-renders the list and the user picks the new A2DP sink.
+    return None
 
 
 class SinkSwitcherExtension(Extension):
@@ -256,18 +241,21 @@ class KeywordQueryEventListener(EventListener):
             for sink_id, sink_desc in sinks_list.items():
                 marker = "* " if sink_id == current_id else "  "
                 label = f"{marker}{sink_id} → {sink_desc}"
-                low_quality = get_bluetooth_low_quality_label(sink_id)
+                is_bluetooth = sink_desc.startswith("bluez_output.")
+                low_quality = get_bluetooth_low_quality_label(sink_id, sink_desc) if is_bluetooth else None
                 if low_quality:
                     label += "  [low quality]"
                     description = f"Currently on {low_quality}; selecting will switch to A2DP"
+                    keep_open = True
                 else:
                     description = "Switch to this audio sink"
+                    keep_open = False
                 data = {"sink_id": sink_id, "sink_name": sink_desc}
                 items.append(ExtensionResultItem(
                     icon='images/icon.png',
                     name=label,
                     description=description,
-                    on_enter=ExtensionCustomAction(data, keep_app_open=False)
+                    on_enter=ExtensionCustomAction(data, keep_app_open=keep_open)
                 ))
 
         except Exception as e:
@@ -283,15 +271,45 @@ class KeywordQueryEventListener(EventListener):
 
 
 class ItemEnterEventListener(EventListener):
+    def _rerender_sink_list(self):
+        """Re-parse wpctl status and return the updated sink list."""
+        items = []
+        data = parsed_wpctl_status()
+        audio_sinks = data.get("Audio", {}).get("Sinks", {})
+        sinks_list = audio_sinks.get("list", {})
+        current_id = audio_sinks.get("current")
+        for sink_id, sink_desc in sinks_list.items():
+            marker = "* " if sink_id == current_id else "  "
+            label = f"{marker}{sink_id} → {sink_desc}"
+            is_bluetooth = sink_desc.startswith("bluez_output.")
+            low_quality = get_bluetooth_low_quality_label(sink_id, sink_desc) if is_bluetooth else None
+            if low_quality:
+                label += "  [low quality]"
+                description = f"Currently on {low_quality}; selecting will switch to A2DP"
+                keep_open = True
+            else:
+                description = "Switch to this audio sink"
+                keep_open = False
+            items.append(ExtensionResultItem(
+                icon='images/icon.png',
+                name=label,
+                description=description,
+                on_enter=ExtensionCustomAction({"sink_id": sink_id, "sink_name": sink_desc}, keep_app_open=keep_open)
+            ))
+        return RenderResultListAction(items)
+
     def on_event(self, event, extension):
         data = event.get_data()
         sink_id = data.get("sink_id")
         sink_name = data.get("sink_name")
 
         try:
-            sink_id = ensure_high_quality_profile(sink_id)
-            subprocess.run(["wpctl", "set-default", str(sink_id)], check=True)
-            success_msg = f"Switched to {sink_id} → {sink_name}"
+            new_sink_id = ensure_high_quality_profile(sink_id)
+            if new_sink_id is None:
+                # Profile was switched — re-render so user picks the new A2DP sink.
+                return self._rerender_sink_list()
+            subprocess.run(["wpctl", "set-default", str(new_sink_id)], check=True)
+            success_msg = f"Switched to {new_sink_id} → {sink_name}"
             logger.info(success_msg)
             return RenderResultListAction([ExtensionResultItem(
                 icon='images/icon.png',

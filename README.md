@@ -16,6 +16,7 @@ Ideal for users who want fast audio output switching without opening a full audi
 * Lists all available audio sinks
 * Highlights the current default sink
 * Switches the default sink instantly when selected
+* Auto-switches Bluetooth headsets from HFP/HSP to A2DP (high quality) when selected
 * Uses native Ulauncher UI (no external tools like `fzf`)
 * Lightweight and fast
 
@@ -23,6 +24,7 @@ Ideal for users who want fast audio output switching without opening a full audi
 
 * [Ulauncher](https://ulauncher.io) (with API v2 support)
 * PipeWire with `wpctl` CLI tool available in your PATH
+* `pipewire-pulse` (providing `pactl`) — required for Bluetooth profile switching. Without it, Bluetooth sinks are listed but profile switching is silently skipped.
 
 ## Installation
 
