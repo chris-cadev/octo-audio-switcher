@@ -591,17 +591,6 @@ class EnsureHighQualityProfileTest(unittest.TestCase):
 
 
 class BuildSinkItemsTest(unittest.TestCase):
-    def _status_with_bt_and_alsa(self):
-        return {
-            "Audio": {"Sinks": {
-                "list": {
-                    55: "alsa_output.pci-0000_00_1f.3.analog-stereo",
-                    88: "bluez_output.80_C3_BA_1F_73_9E.1",
-                },
-                "current": 55,
-            }}
-        }
-
     def test_tags_low_quality_bt_and_sets_keep_app_open(self):
         all_props = {
             88: {
