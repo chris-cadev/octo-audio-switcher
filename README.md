@@ -15,7 +15,8 @@ Ideal for users who want fast audio output switching without opening a full audi
 
 * Lists all available audio sinks
 * Highlights the current default sink
-* Switches the default sink instantly when selected
+* Flags Bluetooth sinks stuck on HFP/HSP as `[low quality]`
+* Auto-switches those Bluetooth sinks from HFP/HSP back to A2DP (high quality) when selected
 * Uses native Ulauncher UI (no external tools like `fzf`)
 * Lightweight and fast
 
@@ -49,7 +50,9 @@ Ideal for users who want fast audio output switching without opening a full audi
 1. Activate Ulauncher (default Ctrl+Space)
 2. Type the keyword (default: `sink`)
 3. Select the desired audio sink from the list
-4. The audio output will switch immediately
+4. The audio output will switch immediately. If a Bluetooth sink was stuck on
+   HFP/HSP, the card is switched to A2DP first and the list re-renders —
+   select the refreshed A2DP sink to set it as default
 
 ## Configuration
 

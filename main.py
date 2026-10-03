@@ -1,7 +1,6 @@
 import subprocess
 import os
 import re
-import time
 import json
 import logging
 from collections import defaultdict
@@ -234,81 +233,76 @@ def choose_a2dp_target(available, saved=None):
     )
 
 
-def find_a2dp_sink(device_id, tries=20, interval=0.1):
-    """Poll briefly for an A2DP sink on the given device, return its id or None.
-
-    Matching on device.id + bluez_output. alone can catch the old HFP node
-    while it's still tearing down, so the a2dp profile is required too.
-
-    Each poll uses a single `pw-dump` snapshot (get_all_node_properties)
-    rather than one `wpctl inspect` per sink; only if pw-dump is unavailable
-    does it fall back to the per-sink inspect path.
-    """
-    def is_a2dp(sprops):
-        return (str(sprops.get("device.id")) == str(device_id)
-                and sprops.get("node.name", "").startswith("bluez_output.")
-                and "a2dp" in sprops.get("api.bluez5.profile", "").lower())
-
-    for _ in range(tries):
-        time.sleep(interval)
-        all_props = get_all_node_properties()
-        if all_props is not None:
-            for sid, sprops in all_props.items():
-                if is_a2dp(sprops):
-                    return sid
-            continue
-        # Fallback: no pw-dump — inspect each sink from wpctl status.
-        sinks = parsed_wpctl_status().get("Audio", {}).get("Sinks", {}).get("list", {})
-        for sid in sinks:
-            if is_a2dp(get_node_properties(sid)):
-                return sid
-    return None
-
-
 def ensure_high_quality_profile(sink_id):
-    """For a Bluetooth sink stuck on HFP/HSP, switch its card to the best A2DP profile.
+    """For a Bluetooth sink stuck on HFP/HSP, switch its card to an A2DP profile.
 
-    Returns (id_or_None, profile_switched):
-    - profile_switched is True only if `pactl set-card-profile` succeeded.
-    - id_or_None is the new A2DP sink id to use as default, or None if the
-      profile switch succeeded but the new sink wasn't found within the
-      poll window (the caller must not treat sink_id as still valid in
-      that case — the old node is already gone).
-    - If no switch was needed/attempted, returns (sink_id, False), i.e. the
-      input is still valid to use as-is.
+    Returns sink_id when no profile change is needed or the switch failed
+    (caller may still `wpctl set-default` that id). Returns None after a
+    successful `pactl set-card-profile` so the caller re-renders the list
+    instead of set-default on the destroyed HFP node.
     """
     props = get_node_properties(sink_id)
     if not props.get("node.name", "").startswith("bluez_output."):
-        return sink_id, False
+        return sink_id
 
     current_profile = props.get("api.bluez5.profile", "").lower()
     if "a2dp" in current_profile:
-        return sink_id, False
+        return sink_id
 
     device_id = props.get("device.id")
     if not device_id:
-        return sink_id, False
+        return sink_id
 
     card_name = get_node_properties(device_id).get("device.name", "")
     if not card_name.startswith("bluez_card."):
-        return sink_id, False
+        return sink_id
 
     available = list_card_profiles(card_name)
     saved = get_saved_card_profile(card_name)
     target = choose_a2dp_target(available, saved)
     if not target:
         logger.warning("No A2DP profile available for %s (have: %s)", card_name, list(available))
-        return sink_id, False
+        return sink_id
 
     logger.info("Switching %s from %s to %s", card_name, current_profile or "?", target)
     try:
         subprocess.run(["pactl", "set-card-profile", card_name, target], check=True)
     except (subprocess.CalledProcessError, FileNotFoundError) as e:
         logger.warning("Failed to set card profile %s on %s: %s", target, card_name, e)
-        return sink_id, False
+        return sink_id
 
-    # The old HFP sink node is gone — the new A2DP sink id may differ.
-    return find_a2dp_sink(device_id), True
+    return None
+
+
+def _build_sink_items():
+    """Build sink list items from current wpctl status (shared by both listeners)."""
+    data = parsed_wpctl_status()
+    audio_sinks = data.get("Audio", {}).get("Sinks", {})
+    sinks_list = audio_sinks.get("list", {})
+    current_id = audio_sinks.get("current")
+    all_props = get_all_node_properties()
+    items = []
+    for sink_id, sink_desc in sinks_list.items():
+        marker = "* " if sink_id == current_id else "  "
+        label = f"{marker}{sink_id} → {sink_desc}"
+        low_quality = get_bluetooth_low_quality_label(sink_id, all_props)
+        if low_quality:
+            label += "  [low quality]"
+            description = f"Currently on {low_quality}; selecting will switch to A2DP"
+            keep_open = True
+        else:
+            description = "Switch to this audio sink"
+            keep_open = False
+        items.append(ExtensionResultItem(
+            icon='images/icon.png',
+            name=label,
+            description=description,
+            on_enter=ExtensionCustomAction(
+                {"sink_id": sink_id, "sink_name": sink_desc},
+                keep_app_open=keep_open,
+            ),
+        ))
+    return items
 
 
 class SinkSwitcherExtension(Extension):
@@ -320,76 +314,39 @@ class SinkSwitcherExtension(Extension):
 
 class KeywordQueryEventListener(EventListener):
     def on_event(self, event, extension):
-        items = []
-
         try:
-            data = parsed_wpctl_status()
-
-            audio_sinks = data.get("Audio", {}).get("Sinks", {})
-            sinks_list = audio_sinks.get("list", {})
-            current_id = audio_sinks.get("current")
-
-            if not sinks_list:
+            items = _build_sink_items()
+            if not items:
                 items.append(ExtensionResultItem(
                     icon='images/icon.png',
                     name='No audio sinks found',
                     description='No sinks available to switch',
                     on_enter=HideWindowAction()
                 ))
-                return RenderResultListAction(items)
-
-            all_props = get_all_node_properties()
-            for sink_id, sink_desc in sinks_list.items():
-                marker = "* " if sink_id == current_id else "  "
-                label = f"{marker}{sink_id} → {sink_desc}"
-                low_quality = get_bluetooth_low_quality_label(sink_id, all_props)
-                if low_quality:
-                    label += "  [low quality]"
-                    description = f"Currently on {low_quality}; selecting will switch to A2DP"
-                else:
-                    description = "Switch to this audio sink"
-                data = {"sink_id": sink_id, "sink_name": sink_desc}
-                items.append(ExtensionResultItem(
-                    icon='images/icon.png',
-                    name=label,
-                    description=description,
-                    on_enter=ExtensionCustomAction(data, keep_app_open=False)
-                ))
-
+            return RenderResultListAction(items)
         except Exception as e:
             logger.exception("Error parsing wpctl status")
-            items.append(ExtensionResultItem(
+            return RenderResultListAction([ExtensionResultItem(
                 icon='images/icon.png',
                 name='Error retrieving sinks',
                 description=str(e),
                 on_enter=HideWindowAction()
-            ))
-
-        return RenderResultListAction(items)
+            )])
 
 
 class ItemEnterEventListener(EventListener):
     def on_event(self, event, extension):
         data = event.get_data()
-
         sink_id = data.get("sink_id")
         sink_name = data.get("sink_name")
 
         try:
-            new_sink_id, profile_switched = ensure_high_quality_profile(sink_id)
-            if profile_switched and new_sink_id is None:
-                msg = "Switched card to A2DP"
-                logger.info("%s (device.id for %s), new sink not visible within poll window", msg, sink_name)
-                return RenderResultListAction([ExtensionResultItem(
-                    icon='images/icon.png',
-                    name=msg,
-                    description=f"{sink_name} is now on A2DP — reopen and select it to set as default",
-                    on_enter=HideWindowAction()
-                )])
-
-            sink_id = new_sink_id
-            subprocess.run(["wpctl", "set-default", str(sink_id)], check=True)
-            success_msg = f"Switched to {sink_id} → {sink_name}"
+            new_sink_id = ensure_high_quality_profile(sink_id)
+            if new_sink_id is None:
+                # Profile switched — re-render so user picks the new A2DP sink.
+                return RenderResultListAction(_build_sink_items())
+            subprocess.run(["wpctl", "set-default", str(new_sink_id)], check=True)
+            success_msg = f"Switched to {new_sink_id} → {sink_name}"
             logger.info(success_msg)
             return RenderResultListAction([ExtensionResultItem(
                 icon='images/icon.png',

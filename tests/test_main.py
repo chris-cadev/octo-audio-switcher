@@ -124,8 +124,32 @@ class ChooseA2dpTargetTest(unittest.TestCase):
         self.assertIsNone(main.choose_a2dp_target(available))
 
 
-class EnsureHighQualityProfileTimeoutTest(unittest.TestCase):
-    def test_timeout_after_successful_switch_returns_none_but_reports_switched(self):
+class EnsureHighQualityProfileRerenderTest(unittest.TestCase):
+    def test_successful_switch_returns_none_and_does_not_poll(self):
+        bluez_props = {
+            "node.name": "bluez_output.80_C3_BA_1F_73_9E.1",
+            "api.bluez5.profile": "headset-head-unit",
+            "device.id": "117",
+        }
+        card_props = {"device.name": "bluez_card.80_C3_BA_1F_73_9E"}
+
+        def fake_get_node_properties(node_id):
+            return card_props if node_id == "117" else bluez_props
+
+        self.assertFalse(hasattr(main, "find_a2dp_sink"))
+        with patch("main.get_node_properties", side_effect=fake_get_node_properties), \
+             patch("main.list_card_profiles", return_value={"a2dp-sink": 20}), \
+             patch("main.get_saved_card_profile", return_value=None), \
+             patch("main.subprocess.run") as mock_run:
+            result = main.ensure_high_quality_profile(55)
+
+        mock_run.assert_called_once_with(
+            ["pactl", "set-card-profile", "bluez_card.80_C3_BA_1F_73_9E", "a2dp-sink"],
+            check=True,
+        )
+        self.assertIsNone(result)
+
+    def test_failed_switch_returns_original_id(self):
         bluez_props = {
             "node.name": "bluez_output.80_C3_BA_1F_73_9E.1",
             "api.bluez5.profile": "headset-head-unit",
@@ -139,45 +163,21 @@ class EnsureHighQualityProfileTimeoutTest(unittest.TestCase):
         with patch("main.get_node_properties", side_effect=fake_get_node_properties), \
              patch("main.list_card_profiles", return_value={"a2dp-sink": 20}), \
              patch("main.get_saved_card_profile", return_value=None), \
-             patch("main.subprocess.run") as mock_run, \
-             patch("main.find_a2dp_sink", return_value=None) as mock_find:
-            sink_id, profile_switched = main.ensure_high_quality_profile(55)
+             patch("main.subprocess.run", side_effect=FileNotFoundError):
+            result = main.ensure_high_quality_profile(55)
 
-        mock_run.assert_called_once_with(
-            ["pactl", "set-card-profile", "bluez_card.80_C3_BA_1F_73_9E", "a2dp-sink"],
-            check=True,
-        )
-        mock_find.assert_called_once_with("117")
-        self.assertIsNone(sink_id)
-        self.assertTrue(profile_switched)
+        self.assertEqual(result, 55)
 
-
-class FindA2dpSinkTest(unittest.TestCase):
-    def test_prefers_a2dp_node_and_skips_hfp_via_snapshot(self):
-        snapshot = {
-            70: {"device.id": "117", "node.name": "bluez_output.80_C3_BA_1F_73_9E.1",
-                 "api.bluez5.profile": "headset-head-unit"},   # HFP — must skip
-            71: {"device.id": "117", "node.name": "bluez_output.80_C3_BA_1F_73_9E.2",
-                 "api.bluez5.profile": "a2dp-sink"},            # A2DP — want this
+    def test_already_a2dp_returns_original_id_without_pactl(self):
+        props = {
+            "node.name": "bluez_output.80_C3_BA_1F_73_9E.2",
+            "api.bluez5.profile": "a2dp-sink",
         }
-        with patch("main.get_all_node_properties", return_value=snapshot), \
-             patch("main.time.sleep"):
-            self.assertEqual(main.find_a2dp_sink("117"), 71)
-
-    def test_returns_none_when_no_a2dp_appears(self):
-        with patch("main.get_all_node_properties", return_value={}), \
-             patch("main.time.sleep"):
-            self.assertIsNone(main.find_a2dp_sink("117", tries=2))
-
-    def test_falls_back_to_per_sink_inspect_without_pw_dump(self):
-        status = {"Audio": {"Sinks": {"list": {88: "desc"}}}}
-        props = {"device.id": "117", "node.name": "bluez_output.x",
-                 "api.bluez5.profile": "a2dp-sink"}
-        with patch("main.get_all_node_properties", return_value=None), \
-             patch("main.parsed_wpctl_status", return_value=status), \
-             patch("main.get_node_properties", return_value=props), \
-             patch("main.time.sleep"):
-            self.assertEqual(main.find_a2dp_sink("117"), 88)
+        with patch("main.get_node_properties", return_value=props), \
+             patch("main.subprocess.run") as mock_run:
+            result = main.ensure_high_quality_profile(70)
+        mock_run.assert_not_called()
+        self.assertEqual(result, 70)
 
 
 if __name__ == "__main__":
