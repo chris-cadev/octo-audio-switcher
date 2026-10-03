@@ -15,7 +15,8 @@ Ideal for users who want fast audio output switching without opening a full audi
 
 * Lists all available audio sinks
 * Highlights the current default sink
-* Switches the default sink instantly when selected
+* Flags Bluetooth sinks stuck on HFP/HSP as `[low quality]`
+* Auto-switches those Bluetooth sinks from HFP/HSP back to A2DP (high quality) when selected
 * Uses native Ulauncher UI (no external tools like `fzf`)
 * Lightweight and fast
 
@@ -23,6 +24,12 @@ Ideal for users who want fast audio output switching without opening a full audi
 
 * [Ulauncher](https://ulauncher.io) (with API v2 support)
 * PipeWire with `wpctl` CLI tool available in your PATH
+* `pactl` (pipewire-pulse) available in your PATH — required for the Bluetooth
+  A2DP profile-switching feature; without it, that feature silently no-ops
+  and sinks behave as before
+* `pw-dump` (optional) — used to fetch all sinks' properties in a single
+  call instead of one per sink; if missing, the extension falls back to
+  the slower per-sink `wpctl inspect` path automatically
 
 ## Installation
 
@@ -43,7 +50,9 @@ Ideal for users who want fast audio output switching without opening a full audi
 1. Activate Ulauncher (default Ctrl+Space)
 2. Type the keyword (default: `sink`)
 3. Select the desired audio sink from the list
-4. The audio output will switch immediately
+4. The audio output will switch immediately. If a Bluetooth sink was stuck on
+   HFP/HSP, the card is switched to A2DP first and the list re-renders —
+   select the refreshed A2DP sink to set it as default
 
 ## Configuration
 
@@ -54,6 +63,10 @@ Ideal for users who want fast audio output switching without opening a full audi
 * Make sure `wpctl` is installed and working (`wpctl status` shows your sinks)
 * Verify your PipeWire setup is active
 * Check Ulauncher logs for errors (`ulauncher -v` or system logs)
+* On WirePlumber 0.5+, saved per-card codec preference isn't read from
+  `~/.local/state/wireplumber/default-profile` (that file is a WirePlumber 0.4
+  mechanism) — the extension falls back to the card's generic `a2dp-sink`
+  profile, or its highest-priority `a2dp-sink*` variant, in that case
 
 ## License
 
